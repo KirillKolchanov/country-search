@@ -23,6 +23,10 @@ export default tseslint.config(
         { property: 'insertAdjacentHTML', message: 'Use DOM APIs instead.' },
       ],
       '@typescript-eslint/consistent-type-imports': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
       '@typescript-eslint/explicit-function-return-type': ['error', { allowExpressions: true }],
     },
   },
