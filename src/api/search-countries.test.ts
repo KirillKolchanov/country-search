@@ -4,7 +4,12 @@ import { createFetchMock, jsonResponse, textResponse } from '../test/fetch-mock.
 import type { PendingRequest } from '../test/fetch-mock.js';
 import { HttpError } from './http-error.js';
 import { mapCountryResponse } from './map-country-response.js';
-import { API_BASE_URL, searchCountries } from './search-countries.js';
+import { API_BASE_URL, SEARCH_TIMEOUT_MS, searchCountries } from './search-countries.js';
+
+/** Short real timeout: `AbortSignal.timeout` is not driven by fake timers. */
+const TEST_TIMEOUT_MS = 10;
+/** Upper bound for tests that wait for the timeout, so a missing timeout fails fast. */
+const FAIL_FAST_MS = 500;
 
 describe('searchCountries', () => {
   let requests: PendingRequest[];
@@ -143,6 +148,62 @@ describe('searchCountries', () => {
       request.respond(jsonResponse(spainResponse));
 
       await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+    });
+  });
+
+  describe('timeout', () => {
+    it('uses SEARCH_TIMEOUT_MS by default', async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      void searchCountries('spain', new AbortController().signal).catch(() => undefined);
+      await flush();
+
+      expect(timeoutSpy).toHaveBeenCalledWith(SEARCH_TIMEOUT_MS);
+    });
+
+    it(
+      'rejects with TimeoutError when the server does not answer in time',
+      async () => {
+        const result = searchCountries('spain', new AbortController().signal, {
+          timeoutMs: TEST_TIMEOUT_MS,
+        });
+
+        await expect(result).rejects.toMatchObject({ name: 'TimeoutError' });
+      },
+      FAIL_FAST_MS,
+    );
+
+    it(
+      'aborts the underlying fetch on timeout',
+      async () => {
+        const result = searchCountries('spain', new AbortController().signal, {
+          timeoutMs: TEST_TIMEOUT_MS,
+        });
+        await result.catch(() => undefined);
+
+        expect(lastRequest().signal?.aborted).toBe(true);
+      },
+      FAIL_FAST_MS,
+    );
+
+    it('still reports our own cancellation as AbortError, not TimeoutError', async () => {
+      const controller = new AbortController();
+      const result = searchCountries('spain', controller.signal, { timeoutMs: TEST_TIMEOUT_MS });
+      await flush();
+
+      controller.abort();
+
+      await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    it('does not fail a response that arrives before the timeout', async () => {
+      const result = searchCountries('spain', new AbortController().signal, {
+        timeoutMs: TEST_TIMEOUT_MS * 100,
+      });
+      await flush();
+      lastRequest().respond(jsonResponse(spainResponse));
+
+      await expect(result).resolves.toHaveLength(1);
     });
   });
 });
