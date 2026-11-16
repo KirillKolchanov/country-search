@@ -152,13 +152,50 @@ describe('searchCountries', () => {
   });
 
   describe('timeout', () => {
-    it('uses SEARCH_TIMEOUT_MS by default', async () => {
-      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    describe('with fake timers', () => {
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
 
-      void searchCountries('spain', new AbortController().signal).catch(() => undefined);
-      await flush();
+      afterEach(() => {
+        vi.useRealTimers();
+      });
 
-      expect(timeoutSpy).toHaveBeenCalledWith(SEARCH_TIMEOUT_MS);
+      it(
+        'times out after SEARCH_TIMEOUT_MS by default',
+        async () => {
+          const result = searchCountries('spain', new AbortController().signal);
+          result.catch(() => undefined);
+          await flush();
+
+          await vi.advanceTimersByTimeAsync(SEARCH_TIMEOUT_MS - 1);
+          expect(lastRequest().signal?.aborted).toBe(false);
+
+          await vi.advanceTimersByTimeAsync(1);
+          await expect(result).rejects.toMatchObject({ name: 'TimeoutError' });
+        },
+        FAIL_FAST_MS,
+      );
+
+      it('leaves no pending timer once the response has arrived', async () => {
+        const result = searchCountries('spain', new AbortController().signal);
+        await flush();
+        lastRequest().respond(jsonResponse(spainResponse));
+        await result;
+
+        expect(vi.getTimerCount()).toBe(0);
+      });
+
+      it('leaves no pending timer after our own cancellation', async () => {
+        const controller = new AbortController();
+        const result = searchCountries('spain', controller.signal);
+        await flush();
+
+        controller.abort();
+        await result.catch(() => undefined);
+
+        expect(vi.getTimerCount()).toBe(0);
+      });
     });
 
     it(
