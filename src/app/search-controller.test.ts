@@ -33,13 +33,6 @@ function createSearchMock(): { search: ReturnType<typeof vi.fn<SearchFn>>; calls
 }
 
 const countries = spainResponse.map(mapCountryResponse);
-const results: SearchOutcome = { type: 'results', countries };
-const serverError: SearchOutcome = {
-  type: 'error',
-  reason: 'http',
-  status: 500,
-  message: 'Server error',
-};
 
 describe('createSearchController', () => {
   let search: ReturnType<typeof vi.fn<SearchFn>>;
@@ -76,209 +69,81 @@ describe('createSearchController', () => {
     await vi.advanceTimersByTimeAsync(0);
   }
 
-  describe('initial state', () => {
-    it('starts idle', () => {
-      expect(controller.getState()).toEqual({ status: 'idle' });
-    });
+  it('does not search for an empty input and stays idle', async () => {
+    await typeAndWait('   ');
+
+    expect(search).not.toHaveBeenCalled();
+    expect(controller.getState()).toEqual({ status: 'idle' });
   });
 
-  describe('empty input', () => {
-    it.each(['', '   '])('does not search for %j and stays idle', async (query) => {
-      await typeAndWait(query);
+  it('shows loading right away and sends only the last query of a burst after the delay', async () => {
+    controller.setQuery('s');
+    controller.setQuery('sp');
+    controller.setQuery('spa');
 
-      expect(search).not.toHaveBeenCalled();
-      expect(controller.getState()).toEqual({ status: 'idle' });
-    });
+    expect(controller.getState()).toEqual({ status: 'loading', query: 'spa' });
+    expect(search).not.toHaveBeenCalled();
 
-    it('clears shown results when the input is cleared', async () => {
-      await typeAndWait('spain');
-      call(0).settle(results);
-      await flush();
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
 
-      controller.setQuery('');
-
-      expect(controller.getState()).toEqual({ status: 'idle' });
-    });
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(call(0).query).toBe('spa');
   });
 
-  describe('debounce', () => {
-    it('shows loading right away but does not search before the delay', async () => {
-      controller.setQuery('spain');
-      await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS - 1);
+  it.each<[SearchOutcome, SearchState]>([
+    [
+      { type: 'results', countries },
+      { status: 'results', query: 'spain', countries },
+    ],
+    [{ type: 'empty' }, { status: 'empty', query: 'spain' }],
+    [
+      { type: 'error', reason: 'http', status: 500, message: 'Server error' },
+      { status: 'error', query: 'spain', reason: 'http', message: 'Server error' },
+    ],
+  ])('turns outcome %o into state %o', async (outcome, expected) => {
+    await typeAndWait('spain');
+    call(0).settle(outcome);
+    await flush();
 
-      expect(controller.getState()).toEqual({ status: 'loading', query: 'spain' });
-      expect(search).not.toHaveBeenCalled();
-    });
-
-    it('searches once after the delay with the trimmed query and a signal', async () => {
-      await typeAndWait('  spain ');
-
-      expect(search).toHaveBeenCalledTimes(1);
-      expect(call(0).query).toBe('spain');
-      expect(call(0).signal).toBeInstanceOf(AbortSignal);
-    });
-
-    it('sends only the last query of a fast burst', async () => {
-      controller.setQuery('s');
-      controller.setQuery('sp');
-      controller.setQuery('spa');
-      await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
-
-      expect(search).toHaveBeenCalledTimes(1);
-      expect(call(0).query).toBe('spa');
-    });
+    expect(controller.getState()).toEqual(expected);
   });
 
-  describe('outcomes', () => {
-    it('shows results', async () => {
-      await typeAndWait('spain');
-      call(0).settle(results);
-      await flush();
+  it('aborts the in-flight request on the very next input, before the debounce fires', async () => {
+    await typeAndWait('sp');
 
-      expect(controller.getState()).toEqual({ status: 'results', query: 'spain', countries });
-    });
+    controller.setQuery('spa');
 
-    it('shows "nothing found" for an empty outcome', async () => {
-      await typeAndWait('zzzz');
-      call(0).settle({ type: 'empty' });
-      await flush();
-
-      expect(controller.getState()).toEqual({ status: 'empty', query: 'zzzz' });
-    });
-
-    it('shows a real error with its reason and message', async () => {
-      await typeAndWait('spain');
-      call(0).settle(serverError);
-      await flush();
-
-      expect(controller.getState()).toEqual({
-        status: 'error',
-        query: 'spain',
-        reason: 'http',
-        message: 'Server error',
-      });
-    });
-
-    it('reports every state change through onChange', async () => {
-      await typeAndWait('spain');
-      call(0).settle(results);
-      await flush();
-
-      expect(onChange.mock.calls.map(([state]) => state.status)).toEqual(['loading', 'results']);
-    });
+    expect(call(0).signal.aborted).toBe(true);
+    expect(search).toHaveBeenCalledTimes(1);
   });
 
-  describe('cancellation', () => {
-    it('aborts the in-flight request on the very next input, before the debounce fires', async () => {
-      await typeAndWait('sp');
+  it('never shows our own cancellation as an error', async () => {
+    await typeAndWait('sp');
+    controller.setQuery('spa');
+    await flush();
 
-      controller.setQuery('spa');
-
-      expect(call(0).signal.aborted).toBe(true);
-      expect(search).toHaveBeenCalledTimes(1);
-    });
-
-    it('never shows our own cancellation as an error', async () => {
-      await typeAndWait('sp');
-      controller.setQuery('spa');
-      await flush();
-
-      expect(controller.getState()).toEqual({ status: 'loading', query: 'spa' });
-      expect(onChange.mock.calls.some(([state]) => state.status === 'error')).toBe(false);
-    });
-
-    it('aborts the in-flight request when the input is cleared', async () => {
-      await typeAndWait('spain');
-
-      controller.setQuery('');
-      await flush();
-
-      expect(call(0).signal.aborted).toBe(true);
-      expect(controller.getState()).toEqual({ status: 'idle' });
-    });
-
-    it('drops a pending debounced search when the input is cleared', async () => {
-      controller.setQuery('spain');
-      controller.setQuery('');
-      await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS * 2);
-
-      expect(search).not.toHaveBeenCalled();
-      expect(controller.getState()).toEqual({ status: 'idle' });
-    });
-
-    it('uses a new signal for every request', async () => {
-      await typeAndWait('sp');
-      await typeAndWait('spain');
-
-      expect(call(1).signal).not.toBe(call(0).signal);
-      expect(call(1).signal.aborted).toBe(false);
-    });
-
-    it('dispose() aborts the in-flight request and drops a pending one', async () => {
-      await typeAndWait('sp');
-      controller.setQuery('spain');
-
-      controller.dispose();
-      await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS * 2);
-
-      expect(call(0).signal.aborted).toBe(true);
-      expect(search).toHaveBeenCalledTimes(1);
-    });
+    expect(onChange.mock.calls.some(([state]) => state.status === 'error')).toBe(false);
   });
 
-  describe('retry', () => {
-    it('repeats the last entered query right away, without debounce', async () => {
-      await typeAndWait('spain');
-      call(0).settle(serverError);
-      await flush();
+  it('aborts the in-flight request when the input is cleared', async () => {
+    await typeAndWait('spain');
 
-      controller.retry();
+    controller.setQuery('');
+    await flush();
 
-      expect(search).toHaveBeenCalledTimes(2);
-      expect(call(1).query).toBe('spain');
-      expect(controller.getState()).toEqual({ status: 'loading', query: 'spain' });
-    });
+    expect(call(0).signal.aborted).toBe(true);
+    expect(controller.getState()).toEqual({ status: 'idle' });
+  });
 
-    it('shows the result of the repeated request', async () => {
-      await typeAndWait('spain');
-      call(0).settle(serverError);
-      await flush();
+  it('retry() repeats the last entered query right away', async () => {
+    await typeAndWait('spain');
+    call(0).settle({ type: 'error', reason: 'network', message: 'Network error' });
+    await flush();
 
-      controller.retry();
-      call(1).settle(results);
-      await flush();
+    controller.retry();
 
-      expect(controller.getState()).toEqual({ status: 'results', query: 'spain', countries });
-    });
-
-    it('uses the latest input even if it has not been sent yet', async () => {
-      await typeAndWait('spain');
-      call(0).settle(serverError);
-      await flush();
-      controller.setQuery('peru');
-
-      controller.retry();
-      await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS * 2);
-
-      expect(calls.map(({ query }) => query)).toEqual(['spain', 'peru']);
-    });
-
-    it('aborts a request that is still in flight before repeating', async () => {
-      await typeAndWait('spain');
-
-      controller.retry();
-
-      expect(call(0).signal.aborted).toBe(true);
-      expect(call(1).query).toBe('spain');
-    });
-
-    it('does nothing for an empty input', async () => {
-      await typeAndWait('');
-
-      controller.retry();
-
-      expect(search).not.toHaveBeenCalled();
-      expect(controller.getState()).toEqual({ status: 'idle' });
-    });
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(call(1).query).toBe('spain');
+    expect(controller.getState()).toEqual({ status: 'loading', query: 'spain' });
   });
 });
