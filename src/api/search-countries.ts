@@ -20,22 +20,51 @@ function buildSearchUrl(query: string): string {
 }
 
 /**
+ * Same contract as `AbortSignal.timeout(ms)` (aborts with a `TimeoutError` DOMException),
+ * but the controller is held by the timer, so the signal cannot be garbage-collected
+ * before it fires, and the timer can be cleared as soon as the request is settled.
+ */
+function createTimeout(ms: number): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timerId = setTimeout(() => {
+    controller.abort(new DOMException(`Request timed out after ${String(ms)} ms`, 'TimeoutError'));
+  }, ms);
+
+  return {
+    signal: controller.signal,
+    clear: () => {
+      clearTimeout(timerId);
+    },
+  };
+}
+
+/**
  * Searches countries by name.
  * Resolves with `[]` when the API reports no matches (404),
  * rejects with `HttpError` for other unsuccessful statuses.
- * Network errors and `AbortError` are passed through unchanged.
+ * Network errors are passed through unchanged; cancellation through `signal`
+ * rejects with `AbortError`, a slow server with `TimeoutError`.
  */
 export async function searchCountries(
   query: string,
   signal: AbortSignal,
-  _options: SearchOptions = {},
+  { timeoutMs = SEARCH_TIMEOUT_MS }: SearchOptions = {},
 ): Promise<Country[]> {
-  const response = await fetch(buildSearchUrl(query), { signal });
+  // One signal for fetch, two reasons to abort: our cancellation or the timeout.
+  // Each keeps its own `reason`, so AbortError and TimeoutError stay distinguishable.
+  const timeout = createTimeout(timeoutMs);
+  const requestSignal = AbortSignal.any([signal, timeout.signal]);
 
-  if (response.status === NO_MATCHES_STATUS) return [];
-  // fetch does not reject on 4xx/5xx, so the status has to be checked by hand.
-  if (!response.ok) throw new HttpError(response.status);
+  try {
+    const response = await fetch(buildSearchUrl(query), { signal: requestSignal });
 
-  const data = (await response.json()) as RawCountry[];
-  return data.map(mapCountryResponse);
+    if (response.status === NO_MATCHES_STATUS) return [];
+    // fetch does not reject on 4xx/5xx, so the status has to be checked by hand.
+    if (!response.ok) throw new HttpError(response.status);
+
+    const data = (await response.json()) as RawCountry[];
+    return data.map(mapCountryResponse);
+  } finally {
+    timeout.clear();
+  }
 }
